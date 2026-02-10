@@ -4,7 +4,11 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import io
 
-from database import init_db, save_entry, get_all_entries, delete_entry, update_entry, export_csv, import_csv
+from database import (
+    init_db, save_entry, get_all_entries, delete_entry, update_entry,
+    export_csv, import_csv, create_user, get_user,
+    username_exists, send_username_reminder,
+)
 from analysis import (
     calc_rolling_average,
     calc_weekly_weight_change,
@@ -18,31 +22,61 @@ st.set_page_config(page_title="Health Tracker", layout="wide")
 
 init_db()
 
-# ==================== EMAIL SIGN-IN GATE ====================
-if "user_email" not in st.session_state:
+# ==================== USERNAME SIGN-IN GATE ====================
+if "username" not in st.session_state:
     st.title("Health Tracker")
-    st.subheader("Sign in to continue")
-    with st.form("sign_in_form"):
-        email_input = st.text_input("Email address")
-        sign_in = st.form_submit_button("Sign In")
-        if sign_in:
-            if email_input and "@" in email_input:
-                st.session_state["user_email"] = email_input.strip().lower()
-                st.rerun()
-            else:
-                st.error("Please enter a valid email address.")
+
+    tab_signin, tab_create = st.tabs(["Sign In", "Create Account"])
+
+    with tab_signin:
+        with st.form("sign_in_form"):
+            username_input = st.text_input("Username")
+            sign_in = st.form_submit_button("Sign In")
+            if sign_in:
+                username_input = username_input.strip().lower()
+                if not username_input:
+                    st.error("Please enter a username.")
+                elif not username_exists(username_input):
+                    st.error("Username not found. Please create an account first.")
+                else:
+                    st.session_state["username"] = username_input
+                    st.rerun()
+
+    with tab_create:
+        with st.form("create_account_form"):
+            new_username = st.text_input("Choose a username")
+            new_email = st.text_input("Email (optional — we'll send you a reminder of your username)")
+            create_btn = st.form_submit_button("Create Account")
+            if create_btn:
+                new_username = new_username.strip().lower()
+                new_email = new_email.strip().lower() if new_email.strip() else ""
+                if not new_username:
+                    st.error("Please enter a username.")
+                elif username_exists(new_username):
+                    st.error("Username already taken. Please choose another.")
+                else:
+                    email_val = new_email if new_email and "@" in new_email else None
+                    create_user(new_username, email_val)
+                    if email_val:
+                        try:
+                            send_username_reminder(email_val, new_username)
+                        except Exception:
+                            st.warning("Account created, but we couldn't send the reminder email.")
+                    st.session_state["username"] = new_username
+                    st.rerun()
+
     st.stop()
 
-user_email = st.session_state["user_email"]
+username = st.session_state["username"]
 
 # --- Dark mode toggle ---
 dark_mode = st.sidebar.toggle("Dark Mode", value=False)
 plotly_template = "plotly_dark" if dark_mode else "plotly_white"
 
 # --- Sign Out ---
-st.sidebar.caption(f"Signed in as **{user_email}**")
+st.sidebar.caption(f"Signed in as **{username}**")
 if st.sidebar.button("Sign Out"):
-    del st.session_state["user_email"]
+    del st.session_state["username"]
     st.rerun()
 
 # ==================== SIDEBAR ====================
@@ -56,16 +90,16 @@ with st.sidebar.form("entry_form", clear_on_submit=True):
     submitted = st.form_submit_button("Save Entry")
     if submitted:
         cal_value = None if cal_blank else entry_calories
-        save_entry(user_email, str(entry_date), entry_weight, cal_value)
-        st.success(f"Saved entry for {entry_date}")
+        save_entry(username, str(entry_date), entry_weight, cal_value)
+        st.success(f"Saved entry for {entry_date.strftime('%m/%d/%Y')}")
 
 # --- Edit / Delete ---
 with st.sidebar.expander("Edit / Delete Entry"):
-    df_all = get_all_entries(user_email)
+    df_all = get_all_entries(username)
     if len(df_all) > 0:
-        date_options = df_all["date"].dt.strftime("%Y-%m-%d").tolist()
+        date_options = df_all["date"].dt.strftime("%m/%d/%Y").tolist()
         selected_date = st.selectbox("Select entry by date", date_options)
-        row = df_all[df_all["date"].dt.strftime("%Y-%m-%d") == selected_date].iloc[0]
+        row = df_all[df_all["date"].dt.strftime("%m/%d/%Y") == selected_date].iloc[0]
         edit_weight = st.number_input("Weight", value=float(row["weight_lbs"]), step=0.1, key="edit_w")
         current_cal = float(row["calories"]) if pd.notna(row["calories"]) else 0.0
         edit_calories = st.number_input("Calories", value=current_cal, step=50.0, key="edit_c")
@@ -75,7 +109,9 @@ with st.sidebar.expander("Edit / Delete Entry"):
         with col_upd:
             if st.button("Update"):
                 cal_val = None if edit_no_cal else edit_calories
-                update_entry(int(row["id"]), selected_date, edit_weight, cal_val)
+                # Store date internally as YYYY-MM-DD
+                internal_date = row["date"].strftime("%Y-%m-%d")
+                update_entry(int(row["id"]), internal_date, edit_weight, cal_val)
                 st.success("Updated!")
                 st.rerun()
         with col_del:
@@ -96,7 +132,7 @@ rolling_opt = st.sidebar.radio("Window:", ["Off", "7-day", "14-day"], index=0)
 
 # --- CSV Export / Import ---
 with st.sidebar.expander("CSV Export / Import"):
-    df_export = get_all_entries(user_email)
+    df_export = get_all_entries(username)
     if len(df_export) > 0:
         csv_buf = io.StringIO()
         df_export.to_csv(csv_buf, index=False)
@@ -107,7 +143,7 @@ with st.sidebar.expander("CSV Export / Import"):
         tmp = os.path.join(tempfile.gettempdir(), "health_import.csv")
         with open(tmp, "wb") as f:
             f.write(uploaded.read())
-        import_csv(tmp, user_email)
+        import_csv(tmp, username)
         st.success("Imported!")
         st.rerun()
 
@@ -115,7 +151,7 @@ with st.sidebar.expander("CSV Export / Import"):
 st.title("Health Tracker")
 
 # Reload data after any changes
-df = get_all_entries(user_email)
+df = get_all_entries(username)
 
 # Apply timeframe filter
 if len(df) > 0:
@@ -169,7 +205,7 @@ fig_weight.update_layout(
     xaxis_title="Date",
     yaxis_title="Weight (lbs)",
     hovermode="x unified",
-    xaxis=dict(fixedrange=True),
+    xaxis=dict(fixedrange=True, tickformat="%m/%d/%Y"),
     yaxis=dict(fixedrange=True),
 )
 st.plotly_chart(fig_weight, use_container_width=True, config={"displayModeBar": False})
