@@ -11,34 +11,66 @@ def _get_conn():
 
 def init_db():
     conn = _get_conn()
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS entries (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date TEXT UNIQUE,
-            weight_lbs REAL,
-            calories REAL
+    # Migrate: if old `entries` table exists without user_email, create new schema
+    cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='entries'")
+    if cursor.fetchone():
+        col_names = [row[1] for row in conn.execute("PRAGMA table_info(entries)")]
+        if "user_email" not in col_names:
+            conn.execute(
+                """
+                CREATE TABLE entries_v2 (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_email TEXT NOT NULL,
+                    date TEXT,
+                    weight_lbs REAL,
+                    calories REAL,
+                    UNIQUE(user_email, date)
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO entries_v2 (user_email, date, weight_lbs, calories)
+                SELECT 'unknown', date, weight_lbs, calories FROM entries
+                """
+            )
+            conn.execute("DROP TABLE entries")
+            conn.execute("ALTER TABLE entries_v2 RENAME TO entries")
+            conn.commit()
+    else:
+        conn.execute(
+            """
+            CREATE TABLE entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_email TEXT NOT NULL,
+                date TEXT,
+                weight_lbs REAL,
+                calories REAL,
+                UNIQUE(user_email, date)
+            )
+            """
         )
-        """
-    )
-    conn.commit()
+        conn.commit()
     conn.close()
 
 
-def save_entry(date: str, weight: float, calories: float | None):
+def save_entry(user_email: str, date: str, weight: float, calories: float | None):
     conn = _get_conn()
     conn.execute(
-        "INSERT OR REPLACE INTO entries (date, weight_lbs, calories) VALUES (?, ?, ?)",
-        (date, weight, calories),
+        "INSERT OR REPLACE INTO entries (user_email, date, weight_lbs, calories) VALUES (?, ?, ?, ?)",
+        (user_email, date, weight, calories),
     )
     conn.commit()
     conn.close()
 
 
-def get_all_entries() -> pd.DataFrame:
+def get_all_entries(user_email: str) -> pd.DataFrame:
     conn = _get_conn()
     df = pd.read_sql_query(
-        "SELECT * FROM entries ORDER BY date ASC", conn, parse_dates=["date"]
+        "SELECT * FROM entries WHERE user_email = ? ORDER BY date ASC",
+        conn,
+        params=(user_email,),
+        parse_dates=["date"],
     )
     conn.close()
     return df
@@ -61,12 +93,12 @@ def update_entry(entry_id: int, date: str, weight: float, calories: float | None
     conn.close()
 
 
-def export_csv(filepath: str):
-    df = get_all_entries()
+def export_csv(filepath: str, user_email: str):
+    df = get_all_entries(user_email)
     df.to_csv(filepath, index=False)
 
 
-def import_csv(filepath: str):
+def import_csv(filepath: str, user_email: str):
     df = pd.read_csv(filepath)
     conn = _get_conn()
     for _, row in df.iterrows():
@@ -78,8 +110,8 @@ def import_csv(filepath: str):
         if pd.isna(calories):
             calories = None
         conn.execute(
-            "INSERT OR REPLACE INTO entries (date, weight_lbs, calories) VALUES (?, ?, ?)",
-            (date, weight, calories),
+            "INSERT OR REPLACE INTO entries (user_email, date, weight_lbs, calories) VALUES (?, ?, ?, ?)",
+            (user_email, date, weight, calories),
         )
     conn.commit()
     conn.close()
